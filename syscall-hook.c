@@ -19,7 +19,10 @@ static struct kprobe kp = {
 
 typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 
-unsigned long sys_call_table;
+unsigned long* sys_call_table;
+
+typedef asmlinkage long (*orig_read_t)(unsigned int fd, char *buf, size_t count);
+orig_read_t orig_read;
 
 /*
  * From kernel 5.0 onwards, the write protect bit of
@@ -47,14 +50,22 @@ void write_protect_wrapper(void (*wrapped_worker)(void))
     custom_write_cr0(cr0);
 }
 
+asmlinkage long hooked_read(unsigned int fd, char *buf, size_t count)
+{
+    long ret = orig_read(fd, buf, count);
+    pr_info("sys_read called\n");
+    return ret;
+}
+
 void create_hook(void)
 {
-
+    orig_read = (orig_read_t) sys_call_table[__NR_read];
+    sys_call_table[__NR_read] = (unsigned long) hooked_read;
 }
 
 void remove_hook(void)
 {
-
+    sys_call_table[__NR_read] = (unsigned long) orig_read;
 }
 
 
@@ -73,12 +84,12 @@ int init_module(void)
     kallsyms_lookup_name = (kallsyms_lookup_name_t) kp.addr;
     unregister_kprobe(&kp);
 
-    sys_call_table = kallsyms_lookup_name("sys_call_table");
+    sys_call_table = (unsigned long*) kallsyms_lookup_name("sys_call_table");
     if (!sys_call_table) {
         pr_debug("cannot find the sys_call_table address\n");
         return -1;
     } else {
-        pr_info("found sys_call_table at %lx\n", sys_call_table);
+        pr_info("found sys_call_table at %lx\n", (unsigned long) sys_call_table);
     }
 
     /* hook and replace the syscall */
