@@ -13,4 +13,4 @@ function that directly writes to the `CR0` register is created to bypass this re
 
 ## 
 
-Latest kernel version tested: `5.14.5-zen2-1-zen`
+Latest kernel version tested: `5.15.5-zen1-1-zen`
