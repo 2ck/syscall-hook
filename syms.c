@@ -108,7 +108,8 @@ int madvise_walk_vmas(struct mm_struct *mm, unsigned long start,
 			  unsigned long end, unsigned long arg,
 			  int (*visit)(struct vm_area_struct *vma,
 				   struct vm_area_struct **prev, unsigned long start,
-				   unsigned long end, unsigned long arg))
+				   unsigned long end, unsigned long arg, struct mmu_gather *tlb),
+			  struct mmu_gather *tlb)
 {
 	struct vm_area_struct *vma;
 	struct vm_area_struct *prev;
@@ -145,7 +146,7 @@ int madvise_walk_vmas(struct mm_struct *mm, unsigned long start,
 			tmp = end;
 
 		/* Here vma->vm_start <= start < tmp <= (end|vma->vm_end). */
-		error = visit(vma, &prev, start, tmp, arg);
+		error = visit(vma, &prev, start, tmp, arg, tlb);
 		if (error)
 			return error;
 		start = tmp;
@@ -162,19 +163,64 @@ int madvise_walk_vmas(struct mm_struct *mm, unsigned long start,
 	return unmapped_error;
 }
 
+
 /* ================================ END unmodified functions from madvise.c ================================ */
 
-static long custom_madvise_dontneed_single_vma(struct vm_area_struct *vma,
-					unsigned long start, unsigned long end)
+static inline void
+custom_mmu_notifier_invalidate_range_start(struct mmu_notifier_range *range)
 {
-	zap_page_range_sym(vma, start, end - start);
+	might_sleep();
+
+	lock_map_acquire(&__mmu_notifier_invalidate_range_start_map);
+	if (mm_has_notifiers(range->mm)) {
+		range->flags |= MMU_NOTIFIER_RANGE_BLOCKABLE;
+		__mmu_notifier_invalidate_range_start_sym(range);
+	}
+	lock_map_release(&__mmu_notifier_invalidate_range_start_map);
+}
+
+static inline void
+custom_mmu_notifier_invalidate_range_end(struct mmu_notifier_range *range)
+{
+	if (mmu_notifier_range_blockable(range))
+		might_sleep();
+
+	if (mm_has_notifiers(range->mm))
+		__mmu_notifier_invalidate_range_end_sym(range, false);
+}
+
+void zap_page_range_noflush(struct vm_area_struct *vma, unsigned long start,
+		unsigned long size, struct mmu_gather* tlb)
+{
+	struct mmu_notifier_range range;
+
+	if (!tlb)
+		return;
+
+	lru_add_drain_sym();
+	mmu_notifier_range_init(&range, MMU_NOTIFY_CLEAR, 0, vma, vma->vm_mm,
+				start, start + size);
+	update_hiwater_rss(vma->vm_mm);
+	custom_mmu_notifier_invalidate_range_start(&range);
+	for ( ; vma && vma->vm_start < range.end; vma = vma->vm_next)
+		unmap_single_vma_sym(tlb, vma, start, range.end, NULL);
+	custom_mmu_notifier_invalidate_range_end(&range);
+}
+
+static long custom_madvise_dontneed_single_vma(struct vm_area_struct *vma,
+					unsigned long start, unsigned long end, struct mmu_gather *tlb)
+{
+	if (tlb)
+		zap_page_range_noflush(vma, start, end - start, tlb);
+	else
+		zap_page_range_sym(vma, start, end - start);
 	return 0;
 }
 
 static long custom_madvise_dontneed_free(struct vm_area_struct *vma,
 				  struct vm_area_struct **prev,
 				  unsigned long start, unsigned long end,
-				  int behavior)
+				  int behavior, struct mmu_gather *tlb)
 {
 	/* struct mm_struct *mm = vma->vm_mm; */
 
@@ -223,7 +269,7 @@ static long custom_madvise_dontneed_free(struct vm_area_struct *vma,
 	/* } */
 
 	if (behavior == MADV_DONTNEED)
-		return custom_madvise_dontneed_single_vma(vma, start, end);
+		return custom_madvise_dontneed_single_vma(vma, start, end, tlb);
 	/* else if (behavior == MADV_FREE) */
 	/* 	return madvise_free_single_vma(vma, start, end); */
 	else
@@ -234,11 +280,12 @@ static long custom_madvise_dontneed_free(struct vm_area_struct *vma,
 static int custom_madvise_vma_behavior(struct vm_area_struct *vma,
 				struct vm_area_struct **prev,
 				unsigned long start, unsigned long end,
-				unsigned long behavior)
+				unsigned long behavior,
+				struct mmu_gather *tlb)
 {
 
 	if (behavior == MADV_DONTNEED)
-		return custom_madvise_dontneed_free(vma, prev, start, end, behavior);
+		return custom_madvise_dontneed_free(vma, prev, start, end, behavior, tlb);
 	else
 		return -EINVAL;
 }
@@ -258,7 +305,7 @@ custom_process_madvise_behavior_valid(int behavior)
 	}
 }
 
-int hooked_do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int behavior)
+int custom_do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, int behavior, struct mmu_gather *tlb)
 {
 	unsigned long end;
 	int error;
@@ -301,7 +348,7 @@ int hooked_do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, 
 
 	blk_start_plug(&plug);
 	error = madvise_walk_vmas(mm, start, end, behavior,
-			custom_madvise_vma_behavior);
+			custom_madvise_vma_behavior, tlb);
 	blk_finish_plug(&plug);
 	if (write)
 		mmap_write_unlock(mm);
@@ -328,6 +375,8 @@ asmlinkage ssize_t hooked_process_madvise(struct pt_regs *regs)
 	size_t vlen = regs->dx;
 	int behavior = regs->r10;
 	unsigned int flags = regs->r8;
+
+	struct mmu_gather tlb;
 
 	if (flags != 0) {
 		ret = -EINVAL;
@@ -367,14 +416,20 @@ asmlinkage ssize_t hooked_process_madvise(struct pt_regs *regs)
 
 	total_len = iov_iter_count(&iter);
 
+	if (behavior == MADV_DONTNEED)
+		tlb_gather_mmu_sym(&tlb, mm);
+
 	while (iov_iter_count(&iter)) {
 		iovec = iov_iter_iovec(&iter);
-		ret = hooked_do_madvise(mm, (unsigned long)iovec.iov_base,
-					iovec.iov_len, behavior);
+		ret = custom_do_madvise(mm, (unsigned long)iovec.iov_base,
+					iovec.iov_len, behavior, &tlb);
 		if (ret < 0)
 			break;
 		iov_iter_advance(&iter, iovec.iov_len);
 	}
+
+	if (behavior == MADV_DONTNEED)
+		tlb_finish_mmu_sym(&tlb);
 
 	if (ret == 0)
 		ret = total_len - iov_iter_count(&iter);

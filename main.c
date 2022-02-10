@@ -23,6 +23,12 @@ zap_page_range_t zap_page_range_sym;
 soft_offline_page_t soft_offline_page_sym;
 find_vma_prev_t find_vma_prev_sym;
 pidfd_get_task_t pidfd_get_task_sym;
+lru_add_drain_t lru_add_drain_sym;
+unmap_single_vma_t unmap_single_vma_sym;
+tlb_finish_mmu_t tlb_finish_mmu_sym;
+__mmu_notifier_invalidate_range_start_t __mmu_notifier_invalidate_range_start_sym;
+__mmu_notifier_invalidate_range_end_t __mmu_notifier_invalidate_range_end_sym;
+tlb_gather_mmu_t tlb_gather_mmu_sym;
 
 typedef asmlinkage ssize_t (*orig_process_madvise_t)(struct pt_regs *regs);
 orig_process_madvise_t orig_process_madvise;
@@ -103,6 +109,24 @@ int init_module(void)
         return -1;
     pidfd_get_task_sym = (void*)kallsyms_lookup_name("pidfd_get_task");
     if (!pidfd_get_task_sym)
+        return -1;
+    lru_add_drain_sym = (void*)kallsyms_lookup_name("lru_add_drain");
+    if (!lru_add_drain_sym)
+        return -1;
+    unmap_single_vma_sym = (void*)kallsyms_lookup_name("unmap_single_vma");
+    if (!unmap_single_vma_sym)
+        return -1;
+    tlb_finish_mmu_sym = (void*)kallsyms_lookup_name("tlb_finish_mmu");
+    if (!tlb_finish_mmu_sym)
+        return -1;
+    __mmu_notifier_invalidate_range_start_sym = (void*)kallsyms_lookup_name("__mmu_notifier_invalidate_range_start");
+    if (!__mmu_notifier_invalidate_range_start_sym)
+        return -1;
+    __mmu_notifier_invalidate_range_end_sym = (void*)kallsyms_lookup_name("__mmu_notifier_invalidate_range_end");
+    if (!__mmu_notifier_invalidate_range_end_sym)
+        return -1;
+    tlb_gather_mmu_sym = (void*)kallsyms_lookup_name("tlb_gather_mmu");
+    if (!tlb_gather_mmu_sym)
         return -1;
 
     /* hook and replace the syscall */
