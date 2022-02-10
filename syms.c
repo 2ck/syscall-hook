@@ -312,108 +312,8 @@ int hooked_do_madvise(struct mm_struct *mm, unsigned long start, size_t len_in, 
 }
 
 
-static int custom_copy_iovec_from_user(struct iovec *iov,
-		const struct iovec __user *uvec, unsigned long nr_segs)
+asmlinkage ssize_t hooked_process_madvise(struct pt_regs *regs)
 {
-	unsigned long seg;
-
-	pr_info("in copy_iovec");
-	if (copy_from_user(iov, uvec, nr_segs * sizeof(*uvec)))
-		return -EFAULT;
-	for (seg = 0; seg < nr_segs; seg++) {
-		if ((ssize_t)iov[seg].iov_len < 0)
-			return -EINVAL;
-	}
-
-	return 0;
-}
-struct iovec *custom_iovec_from_user(const struct iovec __user *uvec,
-		unsigned long nr_segs, unsigned long fast_segs,
-		struct iovec *fast_iov, bool compat)
-{
-	struct iovec *iov = fast_iov;
-	int ret;
-
-	/*
-	 * SuS says "The readv() function *may* fail if the iovcnt argument was
-	 * less than or equal to 0, or greater than {IOV_MAX}.  Linux has
-	 * traditionally returned zero for zero segments, so...
-	 */
-	pr_info("iovec_from_user: nr_segs = %lu", nr_segs);
-	if (nr_segs == 0)
-		return iov;
-	if (nr_segs > UIO_MAXIOV)
-		return ERR_PTR(-EINVAL);
-	if (nr_segs > fast_segs) {
-		iov = kmalloc_array(nr_segs, sizeof(struct iovec), GFP_KERNEL);
-		if (!iov)
-			return ERR_PTR(-ENOMEM);
-	}
-
-	/* if (compat) */
-	/* 	ret = copy_compat_iovec_from_user(iov, uvec, nr_segs); */
-	/* else */
-	ret = custom_copy_iovec_from_user(iov, uvec, nr_segs);
-	if (ret) {
-		if (iov != fast_iov)
-			kfree(iov);
-		return ERR_PTR(ret);
-	}
-
-	return iov;
-}
-
-ssize_t custom_import_iovec(int type, const struct iovec __user *uvec,
-		 unsigned nr_segs, unsigned fast_segs, struct iovec **iovp,
-		 struct iov_iter *i, bool compat)
-{
-	ssize_t total_len = 0;
-	unsigned long seg;
-	struct iovec *iov;
-
-	iov = custom_iovec_from_user(uvec, nr_segs, fast_segs, *iovp, compat);
-	if (IS_ERR(iov)) {
-		*iovp = NULL;
-		return PTR_ERR(iov);
-	}
-
-	/*
-	 * According to the Single Unix Specification we should return EINVAL if
-	 * an element length is < 0 when cast to ssize_t or if the total length
-	 * would overflow the ssize_t return value of the system call.
-	 *
-	 * Linux caps all read/write calls to MAX_RW_COUNT, and avoids the
-	 * overflow case.
-	 */
-	for (seg = 0; seg < nr_segs; seg++) {
-		ssize_t len = (ssize_t)iov[seg].iov_len;
-
-		if (!access_ok(iov[seg].iov_base, len)) {
-			if (iov != *iovp)
-				kfree(iov);
-			*iovp = NULL;
-			return -EFAULT;
-		}
-
-		if (len > MAX_RW_COUNT - total_len) {
-			len = MAX_RW_COUNT - total_len;
-			iov[seg].iov_len = len;
-		}
-		total_len += len;
-	}
-
-	iov_iter_init(i, type, iov, nr_segs, total_len);
-	if (iov == *iovp)
-		*iovp = NULL;
-	else
-		*iovp = iov;
-	return total_len;
-}
-
-
-asmlinkage ssize_t hooked_process_madvise(int pidfd, const struct iovec __user *vec, size_t vlen,
-										  int behavior, unsigned int flags) {
-
 	ssize_t ret;
 	struct iovec iovstack[UIO_FASTIOV], iovec;
 	struct iovec *iov = iovstack;
@@ -423,13 +323,18 @@ asmlinkage ssize_t hooked_process_madvise(int pidfd, const struct iovec __user *
 	size_t total_len;
 	unsigned int f_flags;
 
+	int pidfd = regs->di;
+	const struct iovec __user *vec = (const struct iovec __user *)regs->si;
+	size_t vlen = regs->dx;
+	int behavior = regs->r10;
+	unsigned int flags = regs->r8;
+
 	if (flags != 0) {
 		ret = -EINVAL;
 		goto out;
 	}
-	pr_info("process_madvise: pidfd = %d, vec = %p, vlen = %lu, behavior = %d, flags = %u", pidfd, vec, vlen, behavior, flags);
 
-	ret = custom_import_iovec(READ, vec, vlen, ARRAY_SIZE(iovstack), &iov, &iter, 0);
+	ret = import_iovec(READ, vec, vlen, ARRAY_SIZE(iovstack), &iov, &iter);
 	if (ret < 0)
 		goto out;
 

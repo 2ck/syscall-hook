@@ -1,5 +1,4 @@
 #include <linux/module.h>
-/* #include <linux/kernel.h> */
 #include <linux/kprobes.h>
 #include <linux/printk.h>
 
@@ -19,17 +18,13 @@ typedef unsigned long (*kallsyms_lookup_name_t)(const char *name);
 
 unsigned long* sys_call_table;
 
-/* extern int import_iovec(int type, const struct iovec *uvec, unsigned int nr_segs, unsigned int fast_segs, struct iovec **iovp, struct iov_iter *i); */
 mm_access_t mm_access_sym;
 zap_page_range_t zap_page_range_sym;
 soft_offline_page_t soft_offline_page_sym;
 find_vma_prev_t find_vma_prev_sym;
 pidfd_get_task_t pidfd_get_task_sym;
-iovec_from_user_t iovec_from_user_sym;
 
-typedef asmlinkage ssize_t (*orig_process_madvise_t)(
-    int pidfd, const struct iovec __user *vec, size_t vlen,
-    int behavior, unsigned int flags);
+typedef asmlinkage ssize_t (*orig_process_madvise_t)(struct pt_regs *regs);
 orig_process_madvise_t orig_process_madvise;
 
 
@@ -108,9 +103,6 @@ int init_module(void)
         return -1;
     pidfd_get_task_sym = (void*)kallsyms_lookup_name("pidfd_get_task");
     if (!pidfd_get_task_sym)
-        return -1;
-    iovec_from_user_sym = (void*)kallsyms_lookup_name("iovec_from_user");
-    if (!iovec_from_user_sym)
         return -1;
 
     /* hook and replace the syscall */
